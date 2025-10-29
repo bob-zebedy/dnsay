@@ -86,6 +86,27 @@ func aesd(key, nonce, data, aad []byte) ([]byte, error) {
 	return g.Open(nil, nonce, data, aad)
 }
 
+func parseDNSAddr(addr string) (host string, port int) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+		portStr = ""
+	}
+
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
+	port = 5335
+	if portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+	}
+
+	return host, port
+}
+
 type DNSChat struct {
 	group []byte
 	name  string
@@ -212,25 +233,7 @@ func main() {
 	flag.Float64Var(&interval, "interval", 0.25, "轮询间隔(秒)")
 	flag.Parse()
 
-	parts := strings.Split(dns, ":")
-	dnsHost = parts[0]
-	if dnsHost == "" {
-		dnsHost = "127.0.0.1"
-	}
-
-	dnsPort = 5335
-	if len(parts) > 1 && parts[1] != "" {
-		if port, err := strconv.Atoi(parts[1]); err == nil {
-			dnsPort = port
-		}
-	}
-	if group == "" {
-		group = "default"
-	}
-
-	if name == "" {
-		name = nickname()
-	}
+	dnsHost, dnsPort = parseDNSAddr(dns)
 
 	cli, err := NewDNSChat(dnsHost, dnsPort, group, name)
 	if err != nil {

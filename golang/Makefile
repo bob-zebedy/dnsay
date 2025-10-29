@@ -9,6 +9,9 @@ CLIENT_PKG := ./client
 SERVER_OUT := $(OUT_DIR)/dnsany-server
 CLIENT_OUT := $(OUT_DIR)/dnsay
 
+IMAGE ?= dnsay/server
+TAG ?= latest
+
 .PHONY: all release server client clean docker
 
 all: server client
@@ -26,9 +29,6 @@ client: $(OUT_DIR)
 
 clean:
 	rm -rf $(OUT_DIR)
-
-IMAGE ?= dnsay/server
-TAG ?= latest
 
 docker:
 	docker build -t $(IMAGE):$(TAG) -f Dockerfile .

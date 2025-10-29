@@ -230,6 +230,18 @@ func (h *chatHandler) replyEncrypted(w dns.ResponseWriter, r *dns.Msg, name stri
 	_ = w.WriteMsg(m)
 }
 
+func startPeriodicCleanup(mgr *SessionManager, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		_ = mgr.cleanup()
+	}
+}
+
+func startServer(srv *dns.Server) {
+	_ = srv.ListenAndServe()
+}
+
 func main() {
 	var bind string
 	var port, maxLength, timeout int
@@ -239,18 +251,12 @@ func main() {
 	flag.IntVar(&timeout, "timeout", 300, "会话空闲超时 (秒)")
 	flag.Parse()
 	mgr := NewSessionManager(timeout)
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			_ = mgr.cleanup()
-		}
-	}()
+	go startPeriodicCleanup(mgr, 10*time.Second)
 	handler := &chatHandler{mgr: mgr, maxLength: maxLength}
 	udpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "udp", Handler: handler}
 	tcpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "tcp", Handler: handler}
-	go func() { _ = udpSrv.ListenAndServe() }()
-	go func() { _ = tcpSrv.ListenAndServe() }()
+	go startServer(udpSrv)
+	go startServer(tcpSrv)
 	fmt.Printf("DNS 服务运行中\n%s:%d (UDP/TCP)\n", bind, port)
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
