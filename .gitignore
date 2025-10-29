@@ -4,4 +4,4 @@
 .python-version
 .vscode
 __pycache__
-golang/bin
+bin

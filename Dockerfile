@@ -20,4 +20,4 @@ COPY --from=builder /out/dnsany-server /dnsany-server
 EXPOSE 5335/tcp 5335/udp
 
 ENTRYPOINT ["/dnsany-server"]
-CMD ["--bind","0.0.0.0","--port","5335"]
+CMD ["--bind","0.0.0.0","--port","5335","--verbose","true"]

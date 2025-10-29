@@ -116,9 +116,16 @@ type DNSChat struct {
 	resolver   *net.Resolver
 	serverAddr string
 	timeout    time.Duration
+	verbose    bool
 }
 
-func NewDNSChat(dnsHost string, dnsPort int, group, name string) (*DNSChat, error) {
+func (dc *DNSChat) debug(format string, args ...interface{}) {
+	if dc.verbose {
+		fmt.Printf("[DEBUG] "+format+"\n", args...)
+	}
+}
+
+func NewDNSChat(dnsHost string, dnsPort int, group, name string, verbose bool) (*DNSChat, error) {
 	sid := make([]byte, 4)
 	if _, err := io.ReadFull(rand.Reader, sid); err != nil {
 		return nil, err
@@ -131,7 +138,7 @@ func NewDNSChat(dnsHost string, dnsPort int, group, name string) (*DNSChat, erro
 	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		return d.DialContext(ctx, "udp", serverAddr)
 	}}
-	return &DNSChat{group: []byte(group), name: name, sid: sid, key: key, resolver: r, serverAddr: serverAddr, timeout: 5 * time.Second}, nil
+	return &DNSChat{group: []byte(group), name: name, sid: sid, key: key, resolver: r, serverAddr: serverAddr, timeout: 5 * time.Second, verbose: verbose}, nil
 }
 
 func buildQName(labels []string) string {
@@ -153,6 +160,8 @@ func (dc *DNSChat) SendMessage(message string) {
 	data := append([]byte(dc.name), 0)
 	data = append(data, []byte(message)...)
 	const chunkSize = 80
+	totalChunks := (len(data) + chunkSize - 1) / chunkSize
+	dc.debug("[发送] 会话: %x; 消息: \"%s\"; 分块数: %d;", dc.sid, message, totalChunks)
 	for seq, i := 0, 0; i < len(data); seq, i = seq+1, i+chunkSize {
 		end := i + chunkSize
 		if end > len(data) {
@@ -202,10 +211,15 @@ func (dc *DNSChat) PollMessage() (string, bool) {
 	if err != nil || len(pt) == 0 {
 		return "", false
 	}
+	var formattedMsg string
 	if idx := bytes.IndexByte(pt, 0); idx >= 0 {
-		return fmt.Sprintf("%s: %s", string(pt[:idx]), string(pt[idx+1:])), true
+		formattedMsg = fmt.Sprintf("%s: %s", string(pt[:idx]), string(pt[idx+1:]))
+	} else {
+		formattedMsg = string(pt)
 	}
-	return string(pt), true
+	dc.debug("[接收] 会话: %x; 数据长度: %d;", dc.sid, len(pt))
+	dc.debug("       内容: %s", formattedMsg)
+	return formattedMsg, true
 }
 
 func (dc *DNSChat) ReceiveLoop(interval time.Duration, stop <-chan struct{}) {
@@ -227,15 +241,17 @@ func main() {
 	var name, group, dns, dnsHost string
 	var dnsPort int
 	var interval float64
+	var verbose bool
 	flag.StringVar(&name, "name", nickname(), "昵称")
 	flag.StringVar(&group, "group", "default", "分组ID")
 	flag.StringVar(&dns, "dns", "127.0.0.1:5335", "DNS 服务器 (host:port 格式)")
 	flag.Float64Var(&interval, "interval", 0.25, "轮询间隔(秒)")
+	flag.BoolVar(&verbose, "verbose", false, "调试模式")
 	flag.Parse()
 
 	dnsHost, dnsPort = parseDNSAddr(dns)
 
-	cli, err := NewDNSChat(dnsHost, dnsPort, group, name)
+	cli, err := NewDNSChat(dnsHost, dnsPort, group, name, verbose)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

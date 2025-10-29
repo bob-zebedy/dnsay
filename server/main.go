@@ -157,6 +157,13 @@ func (m *SessionManager) broadcast(grp []byte, senderSid []byte, msg []byte) {
 type chatHandler struct {
 	mgr       *SessionManager
 	maxLength int
+	verbose   bool
+}
+
+func (h *chatHandler) debug(format string, args ...interface{}) {
+	if h.verbose {
+		fmt.Printf("[DEBUG] "+format+"\n", args...)
+	}
 }
 
 func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -185,7 +192,12 @@ func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			h.replyText(w, r, q.Name, "bad")
 			return
 		}
+		h.debug("[接收] 分组: %s; 会话: %x; 消息长度: %d;", string(info.grp), info.sid, len(pt))
+		if len(pt) > 0 {
+			h.debug("       内容: %s", string(pt))
+		}
 		h.mgr.broadcast(info.grp, info.sid, pt)
+		h.debug("[广播] 分组: %s;", string(info.grp))
 		ack := []byte{'o', 'k', byte(info.seq >> 24), byte(info.seq >> 16), byte(info.seq >> 8), byte(info.seq)}
 		h.replyEncrypted(w, r, q.Name, key, info.nonce, ack, info.sid)
 		return
@@ -195,6 +207,10 @@ func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if s != nil && len(s.downq) > 0 {
 			msg = s.downq[0]
 			s.downq = s.downq[1:]
+			h.debug("[发送] 会话: %x; 消息长度: %d;", info.sid, len(msg))
+			if len(msg) > 0 {
+				h.debug("       内容: %s;", string(msg))
+			}
 		} else {
 			msg = []byte{}
 		}
@@ -245,14 +261,16 @@ func startServer(srv *dns.Server) {
 func main() {
 	var bind string
 	var port, maxLength, timeout int
+	var verbose bool
 	flag.StringVar(&bind, "bind", "0.0.0.0", "绑定地址")
 	flag.IntVar(&port, "port", 5335, "监听端口")
 	flag.IntVar(&maxLength, "max-length", 200, "TXT 记录最大长度")
 	flag.IntVar(&timeout, "timeout", 300, "会话空闲超时 (秒)")
+	flag.BoolVar(&verbose, "verbose", false, "调试模式")
 	flag.Parse()
 	mgr := NewSessionManager(timeout)
 	go startPeriodicCleanup(mgr, 10*time.Second)
-	handler := &chatHandler{mgr: mgr, maxLength: maxLength}
+	handler := &chatHandler{mgr: mgr, maxLength: maxLength, verbose: verbose}
 	udpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "udp", Handler: handler}
 	tcpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "tcp", Handler: handler}
 	go startServer(udpSrv)

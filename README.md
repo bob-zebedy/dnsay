@@ -8,7 +8,7 @@
 ### 本地运行
 
 - 克隆代码 `git clone git@github.com:bob-zebedy/dnsay.git`
-- 进入 Golang 目录 `cd dnsay/golang`
+- 进入 Golang 目录 `cd dnsay`
 - 下载依赖 `go mod download`
 - 编译 `make`
 - 运行服务端 `./bin/dnsany-server`
@@ -16,18 +16,9 @@
 
 ### Docker 部署服务端
 - 克隆代码 `git clone git@github.com:bob-zebedy/dnsay.git`
-- 进入 Golang 目录 `cd dnsay/golang`
+- 进入 Golang 目录 `cd dnsay`
 - 编译镜像 `make docker`
 - 启动容器 `docker-compose up -d`
-
-
-## Python
-
-- 克隆代码 `git clone git@github.com:bob-zebedy/dnsay.git`
-- 进入 Python 目录 `cd dnsay/python`
-- 安装依赖 `pip3 install -r requirements.txt`
-- 运行服务端 `python3 server.py`
-- 运行客户端 `python3 client.py`
 
 # 参数说明
 
