@@ -1,0 +1,8 @@
+services:
+  dnsay-server:
+    image: dnsay/server
+    container_name: dnsay-server
+    restart: always
+    ports:
+      - "5335:5335/udp"
+      - "5335:5335/tcp"
