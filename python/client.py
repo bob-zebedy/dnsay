@@ -149,15 +149,17 @@ def main():
     ap = argparse.ArgumentParser(description="DNS 聊天客户端")
     ap.add_argument("--name", default=nickname(), help="昵称")
     ap.add_argument("--group", default="default", help="分组ID")
-    ap.add_argument("--dns-host", default="127.0.0.1", help="DNS 服务器地址")
-    ap.add_argument("--dns-port", type=int, default=5335, help="DNS 服务器端口")
+    ap.add_argument("--dns", default="127.0.0.1:5335", help="DNS 服务器")
     ap.add_argument("--interval", type=float, default=0.25, help="轮询间隔（秒）")
     args = ap.parse_args()
 
     group = args.group or "default"
     name = args.name or nickname()
+    host, port = args.dns.split(":")
+    host = host or "127.0.0.1"
+    port = int(port) or 5335
     
-    client = DNSChat(args.dns_host, args.dns_port, group, name)
+    client = DNSChat(host, host, group, name)
 
     print(f"[你是 '{name}']")
     print(f"[连接到 {args.dns_host}:{args.dns_port}, 分组 '{group}']")

@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -202,15 +203,27 @@ func (dc *DNSChat) ReceiveLoop(interval time.Duration, stop <-chan struct{}) {
 }
 
 func main() {
-	var name, group, dnsHost string
+	var name, group, dns, dnsHost string
 	var dnsPort int
 	var interval float64
 	flag.StringVar(&name, "name", nickname(), "昵称")
 	flag.StringVar(&group, "group", "default", "分组ID")
-	flag.StringVar(&dnsHost, "dns-host", "127.0.0.1", "DNS 服务器地址")
-	flag.IntVar(&dnsPort, "dns-port", 5335, "DNS 服务器端口")
+	flag.StringVar(&dns, "dns", "127.0.0.1:5335", "DNS 服务器 (host:port 格式)")
 	flag.Float64Var(&interval, "interval", 0.25, "轮询间隔(秒)")
 	flag.Parse()
+
+	parts := strings.Split(dns, ":")
+	dnsHost = parts[0]
+	if dnsHost == "" {
+		dnsHost = "127.0.0.1"
+	}
+
+	dnsPort = 5335
+	if len(parts) > 1 && parts[1] != "" {
+		if port, err := strconv.Atoi(parts[1]); err == nil {
+			dnsPort = port
+		}
+	}
 	if group == "" {
 		group = "default"
 	}

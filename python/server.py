@@ -82,9 +82,9 @@ def parse_qname(qname):
 
 
 class SessionManager:
-    def __init__(self, idle_timeout):
+    def __init__(self, timeout):
         self.sessions = {}
-        self.idle_timeout = idle_timeout
+        self.timeout = timeout
         self.lock = threading.Lock()
 
     def touch(self, sid, grp=None):
@@ -108,7 +108,7 @@ class SessionManager:
         now = int(time.time())
         with self.lock:
             expired = [sid for sid, sess in self.sessions.items()
-                       if now - sess["last"] > self.idle_timeout]
+                       if now - sess["last"] > self.timeout]
             for sid in expired:
                 del self.sessions[sid]
             return len(expired)
@@ -189,10 +189,10 @@ def main():
     ap.add_argument("--bind", default="0.0.0.0", help="绑定地址")
     ap.add_argument("--port", type=int, default=5335, help="监听端口")
     ap.add_argument("--max-length", type=int, default=200, help="TXT 记录最大长度")
-    ap.add_argument("--idle", type=int, default=300, help="会话空闲超时 (秒)")
+    ap.add_argument("--timeout", type=int, default=300, help="会话空闲超时 (秒)")
     args = ap.parse_args()
 
-    session_mgr = SessionManager(args.idle)
+    session_mgr = SessionManager(args.timeout)
 
     cleanup_thread = threading.Thread(
         target=cleanup_loop,

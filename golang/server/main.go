@@ -105,12 +105,12 @@ type session struct {
 }
 type SessionManager struct {
 	mu       sync.Mutex
-	idle     int64
+	timeout  int64
 	sessions map[string]*session
 }
 
-func NewSessionManager(idleSeconds int) *SessionManager {
-	return &SessionManager{idle: int64(idleSeconds), sessions: make(map[string]*session)}
+func NewSessionManager(timeout int) *SessionManager {
+	return &SessionManager{timeout: int64(timeout), sessions: make(map[string]*session)}
 }
 func (m *SessionManager) touch(sid []byte, grp []byte) {
 	m.mu.Lock()
@@ -137,7 +137,7 @@ func (m *SessionManager) cleanup() int {
 	defer m.mu.Unlock()
 	removed := 0
 	for k, s := range m.sessions {
-		if now-s.last > m.idle {
+		if now-s.last > m.timeout {
 			delete(m.sessions, k)
 			removed++
 		}
@@ -232,13 +232,13 @@ func (h *chatHandler) replyEncrypted(w dns.ResponseWriter, r *dns.Msg, name stri
 
 func main() {
 	var bind string
-	var port, maxLength, idle int
+	var port, maxLength, timeout int
 	flag.StringVar(&bind, "bind", "0.0.0.0", "绑定地址")
 	flag.IntVar(&port, "port", 5335, "监听端口")
 	flag.IntVar(&maxLength, "max-length", 200, "TXT 记录最大长度")
-	flag.IntVar(&idle, "idle", 300, "会话空闲超时 (秒)")
+	flag.IntVar(&timeout, "timeout", 300, "会话空闲超时 (秒)")
 	flag.Parse()
-	mgr := NewSessionManager(idle)
+	mgr := NewSessionManager(timeout)
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
