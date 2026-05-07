@@ -2,107 +2,80 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/sha256"
-	"encoding/base32"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"dnsay/shared"
+
 	"github.com/miekg/dns"
 )
 
-func b32d(s string) ([]byte, error) {
-	s = strings.ReplaceAll(s, "-", "")
-	enc := base32.StdEncoding
-	u := strings.ToUpper(s)
-	if m := len(u) % 8; m != 0 {
-		u += strings.Repeat("=", 8-m)
-	}
-	return enc.DecodeString(u)
-}
-func b64ud(s string) ([]byte, error) {
-	if m := len(s) % 4; m != 0 {
-		s += strings.Repeat("=", 4-m)
-	}
-	return base64.URLEncoding.DecodeString(s)
-}
-func b64ue(b []byte) string { return base64.URLEncoding.EncodeToString(b) }
-func aese(key, nonce, data, aad []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	g, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return g.Seal(nil, nonce, data, aad), nil
-}
-func aesd(key, nonce, data, aad []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	g, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return g.Open(nil, nonce, data, aad)
-}
-func deriveKey(group []byte) []byte { sum := sha256.Sum256(group); return sum[:] }
+var errShortQName = errors.New("qname too short")
 
 type parsed struct {
-	grp, sid, nonce, payload []byte
-	dir                      string
-	seq                      int
+	grp, sid, payload []byte
+	dir               string
+	seq, total        int
 }
 
 func parseQName(qname string) (*parsed, error) {
 	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
 	if len(labels) < 5 {
-		return nil, errors.New("short")
+		return nil, errShortQName
 	}
-	grp, err := b32d(labels[0])
+	grp, err := shared.B32Decode(labels[0])
 	if err != nil {
 		return nil, err
 	}
-	sid, err := b32d(labels[1])
+	sid, err := shared.B32Decode(labels[1])
 	if err != nil {
 		return nil, err
 	}
 	dir := labels[2]
-	var seq int
-	if _, err := fmt.Sscanf(labels[3], "%d", &seq); err != nil {
-		return nil, err
-	}
-	nonce, err := b32d(labels[4])
+	parts := strings.SplitN(labels[3], "-", 2)
+	seq, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return nil, err
 	}
-	var payload []byte
-	if len(labels) > 5 {
-		payload, err = b64ud(strings.Join(labels[5:], ""))
+	total := 1
+	if len(parts) > 1 {
+		total, err = strconv.Atoi(parts[1])
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &parsed{grp: grp, sid: sid, dir: dir, seq: seq, nonce: nonce, payload: payload}, nil
+	// labels[4] is a query nonce for DNS uniqueness, not used by server
+	var payload []byte
+	if len(labels) > 5 {
+		payload, err = shared.B32Decode(strings.Join(labels[5:], ""))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &parsed{grp: grp, sid: sid, dir: dir, seq: seq, total: total, payload: payload}, nil
+}
+
+type msgBuffer struct {
+	chunks map[int][]byte
+	total  int
 }
 
 type session struct {
-	grp   []byte
-	downq [][]byte
-	last  int64
+	grp    []byte
+	name   string
+	downq  [][]byte
+	last   int64
+	msgBuf *msgBuffer
 }
+
 type SessionManager struct {
 	mu       sync.Mutex
 	timeout  int64
@@ -112,6 +85,7 @@ type SessionManager struct {
 func NewSessionManager(timeout int) *SessionManager {
 	return &SessionManager{timeout: int64(timeout), sessions: make(map[string]*session)}
 }
+
 func (m *SessionManager) touch(sid []byte, grp []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -126,11 +100,51 @@ func (m *SessionManager) touch(sid []byte, grp []byte) {
 		s.grp = grp
 	}
 }
-func (m *SessionManager) get(sid []byte) *session {
+
+func (m *SessionManager) popMessages(sid []byte, maxCount, maxBytes int) [][]byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.sessions[string(sid)]
+	s := m.sessions[string(sid)]
+	if s == nil || len(s.downq) == 0 {
+		return nil
+	}
+	var msgs [][]byte
+	var totalBytes int
+	for len(s.downq) > 0 && len(msgs) < maxCount {
+		msg := s.downq[0]
+		cost := len(msg) + 2
+		if totalBytes+cost > maxBytes && len(msgs) > 0 {
+			break
+		}
+		msgs = append(msgs, msg)
+		totalBytes += cost
+		s.downq = s.downq[1:]
+	}
+	return msgs
 }
+
+func (m *SessionManager) addChunk(sid []byte, seq, total int, data []byte) []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.sessions[string(sid)]
+	if s == nil {
+		return nil
+	}
+	if s.msgBuf == nil || s.msgBuf.total != total || seq == 0 {
+		s.msgBuf = &msgBuffer{chunks: make(map[int][]byte), total: total}
+	}
+	s.msgBuf.chunks[seq] = data
+	if len(s.msgBuf.chunks) == s.msgBuf.total {
+		var result []byte
+		for i := 0; i < total; i++ {
+			result = append(result, s.msgBuf.chunks[i]...)
+		}
+		s.msgBuf = nil
+		return result
+	}
+	return nil
+}
+
 func (m *SessionManager) cleanup() int {
 	now := time.Now().Unix()
 	m.mu.Lock()
@@ -144,6 +158,7 @@ func (m *SessionManager) cleanup() int {
 	}
 	return removed
 }
+
 func (m *SessionManager) broadcast(grp []byte, senderSid []byte, msg []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -154,10 +169,67 @@ func (m *SessionManager) broadcast(grp []byte, senderSid []byte, msg []byte) {
 	}
 }
 
+func (m *SessionManager) hasName(sid []byte) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.sessions[string(sid)]
+	return s != nil && s.name != ""
+}
+
+func (m *SessionManager) remove(sid []byte) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := string(sid)
+	s := m.sessions[k]
+	if s == nil {
+		return ""
+	}
+	name := s.name
+	delete(m.sessions, k)
+	return name
+}
+
+func (m *SessionManager) register(sid, grp []byte, name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := string(sid)
+	for id, s := range m.sessions {
+		if id != k && s.grp != nil && string(s.grp) == string(grp) && s.name == name {
+			return false
+		}
+	}
+	s := m.sessions[k]
+	if s == nil {
+		s = &session{}
+		m.sessions[k] = s
+	}
+	s.grp = grp
+	s.name = name
+	s.last = time.Now().Unix()
+	return true
+}
+
+func (m *SessionManager) listNames(grp []byte) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var names []string
+	for _, s := range m.sessions {
+		if s.grp != nil && string(s.grp) == string(grp) && s.name != "" {
+			names = append(names, s.name)
+		}
+	}
+	return names
+}
+
+const (
+	maxTXTLength = 200
+	maxPollCount = 10
+	maxPollBytes = 4096
+)
+
 type chatHandler struct {
-	mgr       *SessionManager
-	maxLength int
-	verbose   bool
+	mgr     *SessionManager
+	verbose bool
 }
 
 func (h *chatHandler) debug(format string, args ...interface{}) {
@@ -167,118 +239,139 @@ func (h *chatHandler) debug(format string, args ...interface{}) {
 }
 
 func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	if len(r.Question) == 0 {
+		return
+	}
 	q := r.Question[0]
 	if q.Qtype != dns.TypeTXT {
-		m := new(dns.Msg)
-		m.SetReply(r)
-		m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{"ok"}})
-		_ = w.WriteMsg(m)
+		h.replyText(w, r, q.Name, shared.RespOK)
 		return
 	}
 	info, err := parseQName(q.Name)
 	if err != nil {
-		m := new(dns.Msg)
-		m.SetReply(r)
-		m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{"ok"}})
-		_ = w.WriteMsg(m)
+		h.replyText(w, r, q.Name, shared.RespOK)
 		return
 	}
-	key := deriveKey(info.grp)
 	h.mgr.touch(info.sid, info.grp)
 	switch info.dir {
-	case "u":
-		pt, err := aesd(key, info.nonce, info.payload, info.sid)
-		if err != nil {
-			h.replyText(w, r, q.Name, "bad")
+	case shared.DirUpload:
+		if info.total <= 1 {
+			h.debug("[接收] 路由: %x; 会话: %x; 数据长度: %d;", info.grp, info.sid, len(info.payload))
+			h.mgr.broadcast(info.grp, info.sid, info.payload)
+		} else {
+			h.debug("[接收] 路由: %x; 会话: %x; 块: %d/%d; 单次块长度: %d;", info.grp, info.sid, info.seq+1, info.total, len(info.payload))
+			complete := h.mgr.addChunk(info.sid, info.seq, info.total, info.payload)
+			if complete != nil {
+				h.debug("[接收] 路由: %x; 会话: %x; 完整块长度: %d;", info.grp, info.sid, len(complete))
+				h.mgr.broadcast(info.grp, info.sid, complete)
+			}
+		}
+		if h.mgr.hasName(info.sid) {
+			h.replyText(w, r, q.Name, shared.RespOK)
+		} else {
+			h.replyText(w, r, q.Name, shared.RespUnreg)
+		}
+	case shared.DirPoll:
+		msgs := h.mgr.popMessages(info.sid, maxPollCount, maxPollBytes)
+		var buf []byte
+		for _, msg := range msgs {
+			buf = append(buf, byte(len(msg)>>8), byte(len(msg)))
+			buf = append(buf, msg...)
+		}
+		if len(msgs) > 0 {
+			h.debug("[发送] 会话: %x; 消息数: %d; 总长度: %d;", info.sid, len(msgs), len(buf))
+		}
+		h.replyData(w, r, q.Name, buf)
+	case shared.DirJoin:
+		regName := string(info.payload)
+		if regName == "" {
+			h.replyText(w, r, q.Name, shared.RespBad)
 			return
 		}
-		h.debug("[接收] 分组: %s; 会话: %x; 消息长度: %d;", string(info.grp), info.sid, len(pt))
-		if len(pt) > 0 {
-			h.debug("       内容: %s", string(pt))
-		}
-		h.mgr.broadcast(info.grp, info.sid, pt)
-		h.debug("[广播] 分组: %s;", string(info.grp))
-		ack := []byte{'o', 'k', byte(info.seq >> 24), byte(info.seq >> 16), byte(info.seq >> 8), byte(info.seq)}
-		h.replyEncrypted(w, r, q.Name, key, info.nonce, ack, info.sid)
-		return
-	case "p":
-		s := h.mgr.get(info.sid)
-		var msg []byte
-		if s != nil && len(s.downq) > 0 {
-			msg = s.downq[0]
-			s.downq = s.downq[1:]
-			h.debug("[发送] 会话: %x; 消息长度: %d;", info.sid, len(msg))
-			if len(msg) > 0 {
-				h.debug("       内容: %s;", string(msg))
-			}
+		if h.mgr.register(info.sid, info.grp, regName) {
+			h.debug("[注册] 路由: %x; 会话: %x; 昵称: %s;", info.grp, info.sid, regName)
+			h.replyText(w, r, q.Name, shared.RespOK)
 		} else {
-			msg = []byte{}
+			h.debug("[重名] 路由: %x; 会话: %x; 昵称: %s;", info.grp, info.sid, regName)
+			h.replyText(w, r, q.Name, shared.RespDup)
 		}
-		h.replyEncrypted(w, r, q.Name, key, info.nonce, msg, info.sid)
-		return
+	case shared.DirNames:
+		names := h.mgr.listNames(info.grp)
+		if len(names) == 0 {
+			h.replyData(w, r, q.Name, nil)
+			return
+		}
+		h.replyData(w, r, q.Name, []byte(strings.Join(names, "\x00")))
+	case shared.DirLeave:
+		leftName := h.mgr.remove(info.sid)
+		h.debug("[离开] 路由: %x; 会话: %x; 昵称: %s;", info.grp, info.sid, leftName)
+		h.replyText(w, r, q.Name, shared.RespOK)
 	default:
-		h.replyText(w, r, q.Name, "noop")
-		return
+		h.replyText(w, r, q.Name, shared.RespNoop)
 	}
 }
+
 func (h *chatHandler) replyText(w dns.ResponseWriter, r *dns.Msg, name, text string) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{text}})
 	_ = w.WriteMsg(m)
 }
-func (h *chatHandler) replyEncrypted(w dns.ResponseWriter, r *dns.Msg, name string, key, nonce, data, sid []byte) {
-	ct, err := aese(key, nonce, data, sid)
-	if err != nil {
-		h.replyText(w, r, name, "bad")
-		return
-	}
-	enc := b64ue(ct)
+
+func (h *chatHandler) replyData(w dns.ResponseWriter, r *dns.Msg, name string, data []byte) {
 	m := new(dns.Msg)
 	m.SetReply(r)
-	for i := 0; i < len(enc); i += h.maxLength {
-		end := i + h.maxLength
-		if end > len(enc) {
-			end = len(enc)
+	if len(data) == 0 {
+		m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{""}})
+	} else {
+		enc := shared.B64URLEncode(data)
+		for i := 0; i < len(enc); i += maxTXTLength {
+			end := i + maxTXTLength
+			if end > len(enc) {
+				end = len(enc)
+			}
+			m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{enc[i:end]}})
 		}
-		m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{enc[i:end]}})
 	}
 	_ = w.WriteMsg(m)
 }
 
-func startPeriodicCleanup(mgr *SessionManager, interval time.Duration) {
+func startPeriodicCleanup(ctx context.Context, mgr *SessionManager, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		_ = mgr.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			_ = mgr.cleanup()
+		case <-ctx.Done():
+			return
+		}
 	}
-}
-
-func startServer(srv *dns.Server) {
-	_ = srv.ListenAndServe()
 }
 
 func main() {
 	var bind string
-	var port, maxLength, timeout int
+	var port, timeout int
 	var verbose bool
 	flag.StringVar(&bind, "bind", "0.0.0.0", "绑定地址")
 	flag.IntVar(&port, "port", 5335, "监听端口")
-	flag.IntVar(&maxLength, "max-length", 200, "TXT 记录最大长度")
 	flag.IntVar(&timeout, "timeout", 300, "会话空闲超时 (秒)")
 	flag.BoolVar(&verbose, "verbose", false, "调试模式")
 	flag.Parse()
 	mgr := NewSessionManager(timeout)
-	go startPeriodicCleanup(mgr, 10*time.Second)
-	handler := &chatHandler{mgr: mgr, maxLength: maxLength, verbose: verbose}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go startPeriodicCleanup(ctx, mgr, 10*time.Second)
+	handler := &chatHandler{mgr: mgr, verbose: verbose}
 	udpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "udp", Handler: handler}
 	tcpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "tcp", Handler: handler}
-	go startServer(udpSrv)
-	go startServer(tcpSrv)
+	go func() { _ = udpSrv.ListenAndServe() }()
+	go func() { _ = tcpSrv.ListenAndServe() }()
 	fmt.Printf("DNS 服务运行中\n%s:%d (UDP/TCP)\n", bind, port)
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	<-sigc
+	cancel()
 	_ = udpSrv.ShutdownContext(context.Background())
 	_ = tcpSrv.ShutdownContext(context.Background())
 }

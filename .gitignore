@@ -3,5 +3,6 @@
 .idea
 .python-version
 .vscode
+.claude
 __pycache__
 bin
