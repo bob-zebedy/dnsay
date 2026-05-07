@@ -209,18 +209,6 @@ func (m *SessionManager) register(sid, grp []byte, name string) bool {
 	return true
 }
 
-func (m *SessionManager) listNames(grp []byte) []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var names []string
-	for _, s := range m.sessions {
-		if s.grp != nil && string(s.grp) == string(grp) && s.name != "" {
-			names = append(names, s.name)
-		}
-	}
-	return names
-}
-
 const (
 	maxTXTLength = 200
 	maxPollCount = 10
@@ -295,13 +283,6 @@ func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			h.debug("[重名] 路由: %x; 会话: %x; 昵称: %s;", info.grp, info.sid, regName)
 			h.replyText(w, r, q.Name, shared.RespDup)
 		}
-	case shared.DirNames:
-		names := h.mgr.listNames(info.grp)
-		if len(names) == 0 {
-			h.replyData(w, r, q.Name, nil)
-			return
-		}
-		h.replyData(w, r, q.Name, []byte(strings.Join(names, "\x00")))
 	case shared.DirLeave:
 		leftName := h.mgr.remove(info.sid)
 		h.debug("[离开] 路由: %x; 会话: %x; 昵称: %s;", info.grp, info.sid, leftName)

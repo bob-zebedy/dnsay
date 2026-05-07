@@ -19,16 +19,15 @@ const (
 	GCMTagSize    = 16
 	MinE2EBlobLen = NonceSize + GCMTagSize
 
-	DirUpload   = "u"
-	DirPoll     = "p"
-	DirJoin     = "j"
-	DirNames    = "n"
-	DirLeave    = "l"
-	RespOK      = "ok"
-	RespDup     = "dup"
-	RespUnreg   = "unreg"
-	RespBad     = "bad"
-	RespNoop    = "noop"
+	DirUpload = "u"
+	DirPoll   = "p"
+	DirJoin   = "j"
+	DirLeave  = "l"
+	RespOK    = "ok"
+	RespDup   = "dup"
+	RespUnreg = "unreg"
+	RespBad   = "bad"
+	RespNoop  = "noop"
 )
 
 func RandomBytes(n int) ([]byte, error) {
