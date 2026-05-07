@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,8 +19,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-var errShortQName = errors.New("qname too short")
-
 type parsed struct {
 	grp, sid, payload []byte
 	dir               string
@@ -29,7 +28,7 @@ type parsed struct {
 func parseQName(qname string) (*parsed, error) {
 	labels := strings.Split(strings.TrimSuffix(qname, "."), ".")
 	if len(labels) < 5 {
-		return nil, errShortQName
+		return nil, errors.New("qname too short")
 	}
 	grp, err := shared.B32Decode(labels[0])
 	if err != nil {
@@ -66,6 +65,7 @@ func parseQName(qname string) (*parsed, error) {
 type msgBuffer struct {
 	chunks map[int][]byte
 	total  int
+	bytes  int
 }
 
 type session struct {
@@ -133,7 +133,15 @@ func (m *SessionManager) addChunk(sid []byte, seq, total int, data []byte) []byt
 	if s.msgBuf == nil || s.msgBuf.total != total || seq == 0 {
 		s.msgBuf = &msgBuffer{chunks: make(map[int][]byte), total: total}
 	}
+	if prev, ok := s.msgBuf.chunks[seq]; ok {
+		s.msgBuf.bytes -= len(prev)
+	}
 	s.msgBuf.chunks[seq] = data
+	s.msgBuf.bytes += len(data)
+	if s.msgBuf.bytes > maxUploadTotal {
+		s.msgBuf = nil
+		return nil
+	}
 	if len(s.msgBuf.chunks) == s.msgBuf.total {
 		var result []byte
 		for i := 0; i < total; i++ {
@@ -213,6 +221,10 @@ const (
 	maxTXTLength = 200
 	maxPollCount = 10
 	maxPollBytes = 4096
+	maxUploadChunks    = 64
+	maxUploadChunkSize = 256
+	maxUploadTotal     = 4096 + shared.NonceSize + shared.GCMTagSize
+	maxNameBytes       = 64
 )
 
 type chatHandler struct {
@@ -224,6 +236,19 @@ func (h *chatHandler) debug(format string, args ...interface{}) {
 	if h.verbose {
 		fmt.Printf("[DEBUG] "+format+"\n", args...)
 	}
+}
+
+func validUpload(info *parsed) bool {
+	if info.total < 1 || info.total > maxUploadChunks {
+		return false
+	}
+	if info.seq < 0 || info.seq >= info.total {
+		return false
+	}
+	if len(info.payload) == 0 || len(info.payload) > maxUploadChunkSize {
+		return false
+	}
+	return true
 }
 
 func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -243,6 +268,10 @@ func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	h.mgr.touch(info.sid, info.grp)
 	switch info.dir {
 	case shared.DirUpload:
+		if !validUpload(info) {
+			h.replyText(w, r, q.Name, shared.RespBad)
+			return
+		}
 		if info.total <= 1 {
 			h.debug("[接收] 路由: %x; 会话: %x; 数据长度: %d;", info.grp, info.sid, len(info.payload))
 			h.mgr.broadcast(info.grp, info.sid, info.payload)
@@ -271,11 +300,11 @@ func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		h.replyData(w, r, q.Name, buf)
 	case shared.DirJoin:
-		regName := string(info.payload)
-		if regName == "" {
+		if len(info.payload) == 0 || len(info.payload) > maxNameBytes {
 			h.replyText(w, r, q.Name, shared.RespBad)
 			return
 		}
+		regName := string(info.payload)
 		if h.mgr.register(info.sid, info.grp, regName) {
 			h.debug("[注册] 路由: %x; 会话: %x; 昵称: %s;", info.grp, info.sid, regName)
 			h.replyText(w, r, q.Name, shared.RespOK)
@@ -339,20 +368,58 @@ func main() {
 	flag.IntVar(&timeout, "timeout", 300, "会话空闲超时 (秒)")
 	flag.BoolVar(&verbose, "verbose", false, "调试模式")
 	flag.Parse()
+	if port <= 0 || port > 65535 {
+		fmt.Fprintf(os.Stderr, "无效端口: %d\n", port)
+		os.Exit(1)
+	}
+	if timeout <= 0 {
+		fmt.Fprintf(os.Stderr, "无效 timeout: %d, 必须大于 0\n", timeout)
+		os.Exit(1)
+	}
 	mgr := NewSessionManager(timeout)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go startPeriodicCleanup(ctx, mgr, 10*time.Second)
 	handler := &chatHandler{mgr: mgr, verbose: verbose}
-	udpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "udp", Handler: handler}
-	tcpSrv := &dns.Server{Addr: fmt.Sprintf("%s:%d", bind, port), Net: "tcp", Handler: handler}
-	go func() { _ = udpSrv.ListenAndServe() }()
-	go func() { _ = tcpSrv.ListenAndServe() }()
-	fmt.Printf("DNS 服务运行中\n%s:%d (UDP/TCP)\n", bind, port)
+	addr := net.JoinHostPort(bind, strconv.Itoa(port))
+	udpConn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "UDP 监听失败 %s: %v\n", addr, err)
+		os.Exit(1)
+	}
+	tcpLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = udpConn.Close()
+		fmt.Fprintf(os.Stderr, "TCP 监听失败 %s: %v\n", addr, err)
+		os.Exit(1)
+	}
+	udpSrv := &dns.Server{PacketConn: udpConn, Handler: handler}
+	tcpSrv := &dns.Server{Listener: tcpLn, Handler: handler}
+	errc := make(chan error, 2)
+	go func() {
+		if err := udpSrv.ActivateAndServe(); err != nil {
+			errc <- fmt.Errorf("UDP 服务失败: %w", err)
+		}
+	}()
+	go func() {
+		if err := tcpSrv.ActivateAndServe(); err != nil {
+			errc <- fmt.Errorf("TCP 服务失败: %w", err)
+		}
+	}()
+	fmt.Printf("DNS 服务运行中\n%s (UDP/TCP)\n", addr)
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-	<-sigc
+	exitCode := 0
+	select {
+	case <-sigc:
+	case err := <-errc:
+		fmt.Fprintln(os.Stderr, err)
+		exitCode = 1
+	}
 	cancel()
 	_ = udpSrv.ShutdownContext(context.Background())
 	_ = tcpSrv.ShutdownContext(context.Background())
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }

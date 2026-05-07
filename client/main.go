@@ -91,6 +91,8 @@ func parseDNSAddr(addr string) (host string, port int) {
 	if portStr != "" {
 		if p, err := strconv.Atoi(portStr); err == nil {
 			port = p
+		} else {
+			port = 0
 		}
 	}
 
@@ -127,7 +129,7 @@ func NewDNSChat(dnsHost string, dnsPort int, group, name string, verbose bool) (
 	if err != nil {
 		return nil, err
 	}
-	serverAddr := fmt.Sprintf("%s:%d", dnsHost, dnsPort)
+	serverAddr := net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort))
 	d := &net.Dialer{Timeout: 2 * time.Second}
 	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		return d.DialContext(ctx, network, serverAddr)
@@ -419,6 +421,17 @@ func main() {
 	}
 
 	dnsHost, dnsPort = parseDNSAddr(dnsAddr)
+	if strings.HasPrefix(dnsHost, "[") && strings.HasSuffix(dnsHost, "]") {
+		dnsHost = strings.TrimPrefix(strings.TrimSuffix(dnsHost, "]"), "[")
+	}
+	if dnsPort <= 0 || dnsPort > 65535 {
+		fmt.Fprintf(os.Stderr, "无效 DNS 端口: %d\n", dnsPort)
+		os.Exit(1)
+	}
+	if interval <= 0 {
+		fmt.Fprintf(os.Stderr, "无效 interval: %.3f, 必须大于 0\n", interval)
+		os.Exit(1)
+	}
 
 	cli, err := NewDNSChat(dnsHost, dnsPort, group, name, verbose)
 	if err != nil {
@@ -455,7 +468,7 @@ func main() {
 	}
 
 	drawSeparator(messageView, screenW, "")
-	fmt.Fprintf(messageView, "[%s] 连接: %s:%d[-]\n", colorInfo, dnsHost, dnsPort)
+	fmt.Fprintf(messageView, "[%s] 连接: %s[-]\n", colorInfo, net.JoinHostPort(dnsHost, strconv.Itoa(dnsPort)))
 	fmt.Fprintf(messageView, "[%s] 分组: %s[-]\n", colorInfo, group)
 	drawSeparator(messageView, screenW, "")
 	if nameChanged {
