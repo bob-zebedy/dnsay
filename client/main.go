@@ -83,6 +83,9 @@ func parseDNSAddr(addr string) (host string, port int) {
 		portStr = ""
 	}
 
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
 	if host == "" {
 		host = "127.0.0.1"
 	}
@@ -421,9 +424,6 @@ func main() {
 	}
 
 	dnsHost, dnsPort = parseDNSAddr(dnsAddr)
-	if strings.HasPrefix(dnsHost, "[") && strings.HasSuffix(dnsHost, "]") {
-		dnsHost = strings.TrimPrefix(strings.TrimSuffix(dnsHost, "]"), "[")
-	}
 	if dnsPort <= 0 || dnsPort > 65535 {
 		fmt.Fprintf(os.Stderr, "无效 DNS 端口: %d\n", dnsPort)
 		os.Exit(1)
@@ -579,16 +579,14 @@ func main() {
 	}
 
 	browsingHistory := false
-	appendMessage := func(text string) {
-		if idx := strings.Index(text, "[-]: "); idx >= 0 {
-			prefix := text[:idx+5]
-			content := text[idx+5:]
+	appendMessage := func(prefix, content string) {
+		if prefix == "" {
+			fmt.Fprintln(messageView, " "+content)
+		} else {
 			padW := tview.TaggedStringWidth(" " + prefix)
 			pad := strings.Repeat(" ", padW)
 			wrapped := wrapText(content, screenW-padW, pad)
 			fmt.Fprintf(messageView, " %s%s\n", prefix, wrapped)
-		} else {
-			fmt.Fprintln(messageView, " "+text)
 		}
 		if !browsingHistory {
 			messageView.ScrollToEnd()
@@ -644,7 +642,7 @@ func main() {
 				row, col := debugView.GetScrollOffset()
 				debugView.ScrollTo(row+5, col)
 				_, _, _, h := debugView.GetInnerRect()
-				if row+5 >= len(strings.Split(debugView.GetText(false), "\n"))-h {
+				if row+5 >= strings.Count(debugView.GetText(false), "\n")-h {
 					debugBrowsing = false
 					debugView.ScrollToEnd()
 				}
@@ -653,7 +651,7 @@ func main() {
 			row, col := messageView.GetScrollOffset()
 			messageView.ScrollTo(row+5, col)
 			_, _, _, h := messageView.GetInnerRect()
-			if newRow := row + 5; newRow >= len(strings.Split(messageView.GetText(false), "\n"))-h {
+			if row+5 >= strings.Count(messageView.GetText(false), "\n")-h {
 				browsingHistory = false
 				messageView.ScrollToEnd()
 			}
@@ -677,11 +675,11 @@ func main() {
 			histIdx = -1
 			cursorMoved = false
 			inputArea.SetText("", true)
-			appendMessage(fmt.Sprintf("[%s]%s[-]: %s", colorFor(name), name, text))
+			appendMessage(fmt.Sprintf("[%s]%s[-]: ", colorFor(name), name), text)
 			go func() {
 				if err := cli.SendMessage(text); err != nil {
 					app.QueueUpdateDraw(func() {
-						appendMessage(fmt.Sprintf("[%s]%v[-]", colorError, err))
+						appendMessage("", fmt.Sprintf("[%s]%v[-]", colorError, err))
 					})
 				}
 			}()
@@ -726,9 +724,9 @@ func main() {
 			if idx := strings.Index(msg, ": "); idx >= 0 {
 				sender := msg[:idx]
 				content := msg[idx+2:]
-				appendMessage(fmt.Sprintf("[%s]%s[-]: %s", colorFor(sender), sender, content))
+				appendMessage(fmt.Sprintf("[%s]%s[-]: ", colorFor(sender), sender), content)
 			} else {
-				appendMessage(msg)
+				appendMessage("", msg)
 			}
 		})
 	}, stop)

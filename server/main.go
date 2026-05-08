@@ -171,9 +171,13 @@ func (m *SessionManager) broadcast(grp []byte, senderSid []byte, msg []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for sid, s := range m.sessions {
-		if s.grp != nil && string(s.grp) == string(grp) && sid != string(senderSid) {
-			s.downq = append(s.downq, msg)
+		if s.grp == nil || string(s.grp) != string(grp) || sid == string(senderSid) {
+			continue
 		}
+		if len(s.downq) >= maxDownqMsgs {
+			s.downq = s.downq[1:]
+		}
+		s.downq = append(s.downq, msg)
 	}
 }
 
@@ -221,8 +225,9 @@ const (
 	maxTXTLength = 200
 	maxPollCount = 10
 	maxPollBytes = 4096
+	maxDownqMsgs       = 1024
 	maxUploadChunks    = 64
-	maxUploadChunkSize = 256
+	maxUploadChunkSize = 96
 	maxUploadTotal     = 4096 + shared.NonceSize + shared.GCMTagSize
 	maxNameBytes       = 64
 )
@@ -238,7 +243,7 @@ func (h *chatHandler) debug(format string, args ...interface{}) {
 	}
 }
 
-func validUpload(info *parsed) bool {
+func isValidUpload(info *parsed) bool {
 	if info.total < 1 || info.total > maxUploadChunks {
 		return false
 	}
@@ -268,7 +273,7 @@ func (h *chatHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	h.mgr.touch(info.sid, info.grp)
 	switch info.dir {
 	case shared.DirUpload:
-		if !validUpload(info) {
+		if !isValidUpload(info) {
 			h.replyText(w, r, q.Name, shared.RespBad)
 			return
 		}
