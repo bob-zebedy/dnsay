@@ -1,5 +1,6 @@
 services:
   dnsay-server:
+    build: .
     image: dnsay/server
     container_name: dnsay-server
     restart: always
